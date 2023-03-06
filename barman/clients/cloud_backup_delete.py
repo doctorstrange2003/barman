@@ -36,7 +36,7 @@ from barman.cloud_providers import (
 )
 from barman.exceptions import InvalidRetentionPolicy
 from barman.retention_policies import RetentionPolicyFactory
-from barman.utils import force_str
+from barman.utils import check_non_negative, force_str
 from barman import xlog
 
 
@@ -167,12 +167,27 @@ def _delete_backup(
     catalog,
     backup_id,
     dry_run=True,
+    minimum_redundancy=0,
     skip_wal_cleanup_if_standalone=True,
 ):
     backup_info = catalog.get_backup_info(backup_id)
     if not backup_info:
         logging.warning("Backup %s does not exist", backup_id)
         return
+    if minimum_redundancy > 0:
+        if minimum_redundancy >= len(catalog.get_backup_list()):
+            logging.error(
+                "Skipping delete of backup %s for server %s "
+                "due to minimum redundancy requirements "
+                "(minimum redundancy = %s, "
+                "current redundancy = %s)",
+                backup_id,
+                catalog.server_name,
+                minimum_redundancy,
+                len(catalog.get_backup_list()),
+            )
+            raise OperationErrorExit()
+
     if backup_info.snapshots_info:
         logging.debug(
             "Will delete the following snapshots: %s",
@@ -265,7 +280,13 @@ def main(args=None):
                         config.server_name,
                     )
                     raise OperationErrorExit()
-                _delete_backup(cloud_interface, catalog, backup_id, config.dry_run)
+                _delete_backup(
+                    cloud_interface,
+                    catalog,
+                    backup_id,
+                    config.dry_run,
+                    config.minimum_redundancy,
+                )
             elif config.retention_policy:
                 try:
                     retention_policy = RetentionPolicyFactory.create(
@@ -273,6 +294,7 @@ def main(args=None):
                         config.retention_policy,
                         server_name=config.server_name,
                         catalog=catalog,
+                        minimum_redundancy=config.minimum_redundancy,
                     )
                 except InvalidRetentionPolicy as exc:
                     logging.error(
@@ -297,6 +319,7 @@ def main(args=None):
                         catalog,
                         backup_id,
                         config.dry_run,
+                        config.minimum_redundancy,
                         skip_wal_cleanup_if_standalone=False,
                     )
     except Exception as exc:
@@ -321,6 +344,13 @@ def parse_arguments(args=None):
         "-b",
         "--backup-id",
         help="Backup ID of the backup to be deleted",
+    )
+    delete_arguments.add_argument(
+        "-m",
+        "--minimum-redundancy",
+        type=check_non_negative,
+        help="The minimum number of backups that should always be available.",
+        default=0,
     )
     delete_arguments.add_argument(
         "-r",
