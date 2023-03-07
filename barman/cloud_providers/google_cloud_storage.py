@@ -357,7 +357,7 @@ def import_google_cloud_compute():
 
 class GcpCloudSnapshotInterface(CloudSnapshotInterface):
     """
-    Implementation of ClourSnapshotInterface for persistend disk snapshots as
+    Implementation of CloudSnapshotInterface for persistent disk snapshots as
     implemented in Google Cloud Platform as documented at:
 
         https://cloud.google.com/compute/docs/disks/create-snapshots
