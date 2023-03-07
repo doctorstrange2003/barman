@@ -152,6 +152,12 @@ def get_snapshot_interface(config):
                 "when cloud provider is google-cloud-storage"
             )
         return GcpCloudSnapshotInterface(config.snapshot_gcp_project)
+    elif config.cloud_provider == "azure-blob-storage":
+        from barman.cloud_providers.google_cloud_storage import (
+            AzureCloudSnapshotInterface,
+        )
+
+        return AzureCloudSnapshotInterface()
     else:
         raise CloudProviderUnsupported(
             "No snapshot provider for cloud provider: %s" % config.cloud_provider

@@ -25,6 +25,7 @@ from barman.clients.cloud_compression import decompress_to_file
 from barman.cloud import (
     CloudInterface,
     CloudProviderError,
+    CloudSnapshotInterface,
     DecompressingStreamingIO,
     DEFAULT_DELIMITER,
 )
@@ -499,3 +500,40 @@ class AzureCloudInterface(CloudInterface):
 
         if errors:
             raise CloudProviderError()
+
+
+def import_azure_mgmt_compute():
+    """
+    Import and return the azure.mgmt.compute module.
+
+    This particular import happens in a function so that it can be deferred until
+    needed while still allowing tests to easily mock the library.
+    """
+    try:
+        import azure.mgmt.compute as compute
+    except ImportError:
+        raise SystemExit("Missing required python module: azure-mgmt-compute")
+    return compute
+
+
+class AzureCloudSnapshotInterface(CloudSnapshotInterface):
+    """
+    Implementation of CloudSnapshotInterface for managed disk snapshots as
+    implemented in Azure, documented at:
+
+        https://learn.microsoft.com/en-us/azure/virtual-machines/snapshot-copy-managed-disk
+    """
+
+    def __init__(self, subscription_id):
+        """
+        Imports the azure-mgmt-compute library and creates the clients necessary for
+        creating and managing snapshots.
+
+        :param str subscription_id: A Microsoft Azure subscription ID
+        """
+        if subscription_id is None:
+            raise TypeError("subscription_id cannot be None")
+
+        # Import of azure-mgmt-compute is deferred until this point so that it does not
+        # become a hard dependency of this module.
+        compute = import_azure_mgmt_compute()
