@@ -101,6 +101,7 @@ setup(
     extras_require={
         "cloud": ["boto3"],
         "azure": ["azure-identity", "azure-storage-blob"],
+        "azure-snapshots": ["azure-mgmt-compute"],
         "snappy": [
             "python-snappy == 0.6.0"
         ],  # version is limited py python2.7 see issue #529
