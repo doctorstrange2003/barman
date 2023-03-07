@@ -386,6 +386,11 @@ def parse_arguments(args=None):
         help="The name of an encryption scope defined in the Azure Blob Storage "
         "service which is to be used to encrypt the data in Azure",
     )
+    azure_arguments.add_argument(
+        "--snapshot-azure-subscription-id",
+        help="Azure subscription ID which identifies the Microsoft Azure subscription "
+        "used for accessing snapshot-related resources.",
+    )
     return parser.parse_args(args=args)
 
 
