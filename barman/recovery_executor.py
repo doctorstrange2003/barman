@@ -1574,6 +1574,9 @@ class SnapshotRecoveryExecutor(RemoteConfigRecoveryExecutor):
         mount_point_errors = []
         mount_options_errors = []
         for snapshot, device in sorted(attached_snapshots.items()):
+            # TODO it's that hack again
+            if isinstance(device, int):
+                device = cmd.readlink("/dev/disk/azure/scsi1/lun{}".format(device))
             try:
                 mount_point, mount_options = cmd.findmnt(device)
             except CommandException as e:

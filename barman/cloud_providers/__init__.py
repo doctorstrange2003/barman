@@ -153,11 +153,11 @@ def get_snapshot_interface(config):
             )
         return GcpCloudSnapshotInterface(config.snapshot_gcp_project)
     elif config.cloud_provider == "azure-blob-storage":
-        from barman.cloud_providers.google_cloud_storage import (
+        from barman.cloud_providers.azure_blob_storage import (
             AzureCloudSnapshotInterface,
         )
 
-        return AzureCloudSnapshotInterface()
+        return AzureCloudSnapshotInterface(config.snapshot_azure_subscription_id)
     else:
         raise CloudProviderUnsupported(
             "No snapshot provider for cloud provider: %s" % config.cloud_provider
@@ -209,6 +209,12 @@ def get_snapshot_interface_from_backup_info(backup_info):
                 "backup_info has snapshot provider 'gcp' but project is not set"
             )
         return GcpCloudSnapshotInterface(backup_info.snapshots_info.project)
+    elif backup_info.snapshots_info.provider == "azure":
+        from barman.cloud_providers.azure_blob_storage import (
+            AzureCloudSnapshotInterface,
+        )
+
+        return AzureCloudSnapshotInterface(backup_info.snapshots_info.subscription_id)
     else:
         raise CloudProviderUnsupported(
             "Unsupported snapshot provider in backup info: %s"
@@ -230,6 +236,12 @@ def snapshots_info_from_dict(snapshots_info):
         from barman.cloud_providers.google_cloud_storage import GcpSnapshotsInfo
 
         return GcpSnapshotsInfo.from_dict(snapshots_info)
+    elif "provider" in snapshots_info and snapshots_info["provider"] == "azure":
+        from barman.cloud_providers.azure_blob_storage import (
+            AzureSnapshotsInfo,
+        )
+
+        return AzureSnapshotsInfo.from_dict(snapshots_info)
     else:
         raise CloudProviderUnsupported(
             "Unsupported snapshot provider in backup info: %s"

@@ -1498,10 +1498,16 @@ class SnapshotBackupExecutor(ExternalBackupExecutor):
         :param UnixLocalCommand remote_cmd: Wrapper for local/remote commands.
         """
         for snapshot in backup_info.snapshots_info.snapshots:
-            mount_point, mount_options = remote_cmd.findmnt(snapshot.device)
+            # TODO it's that hack again, because device is a lun on azure
+            device = snapshot.device
+            if isinstance(device, int):
+                device = remote_cmd.readlink(
+                    "/dev/disk/azure/scsi1/lun{}".format(device)
+                )
+            mount_point, mount_options = remote_cmd.findmnt(device)
             if mount_point is None:
                 raise BackupException(
-                    "Could not find mount point for device %s" % snapshot.device
+                    "Could not find mount point for device %s" % device
                 )
             else:
                 snapshot.mount_point = mount_point
@@ -1570,6 +1576,14 @@ class SnapshotBackupExecutor(ExternalBackupExecutor):
         for disk in snapshot_disks:
             if disk not in attached_devices.keys():
                 missing_disks.append(disk)
+
+        # If we have integers for our devices then they are LUNs and must be converted
+        # into device names - this is a total hack which we'll clean up once everything
+        # works and we have a better understanding of all the hacks
+        for disk_name, device in attached_devices.items():
+            if isinstance(device, int):
+                device_name = cmd.readlink("/dev/disk/azure/scsi1/lun{}".format(device))
+                attached_devices[disk_name] = device_name
 
         unmounted_disks = []
         for disk in snapshot_disks:

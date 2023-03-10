@@ -28,7 +28,10 @@ from barman.cloud import (
     CloudSnapshotInterface,
     DecompressingStreamingIO,
     DEFAULT_DELIMITER,
+    SnapshotMetadata,
+    SnapshotsInfo,
 )
+from barman.exceptions import SnapshotBackupException
 
 try:
     # Python 3.x
@@ -50,6 +53,8 @@ try:
     )
 except ImportError:
     raise SystemExit("Missing required python module: azure-storage-blob")
+
+_logger = logging.getLogger(__name__)
 
 # Domain for azure blob URIs
 # See https://docs.microsoft.com/en-us/rest/api/storageservices/naming-and-referencing-containers--blobs--and-metadata#resource-uri-syntax
@@ -524,7 +529,7 @@ class AzureCloudSnapshotInterface(CloudSnapshotInterface):
         https://learn.microsoft.com/en-us/azure/virtual-machines/snapshot-copy-managed-disk
     """
 
-    def __init__(self, subscription_id):
+    def __init__(self, subscription_id, credential=None):
         """
         Imports the azure-mgmt-compute library and creates the clients necessary for
         creating and managing snapshots.
@@ -533,7 +538,318 @@ class AzureCloudSnapshotInterface(CloudSnapshotInterface):
         """
         if subscription_id is None:
             raise TypeError("subscription_id cannot be None")
+        self.subscription_id = subscription_id
+
+        self.credential = credential
+        if self.credential is None:
+            try:
+                from azure.identity import DefaultAzureCredential
+            except ImportError:
+                raise SystemExit("Missing required python module: azure-identity")
+            self.credential = DefaultAzureCredential()
 
         # Import of azure-mgmt-compute is deferred until this point so that it does not
         # become a hard dependency of this module.
         compute = import_azure_mgmt_compute()
+
+        self.client = compute.ComputeManagementClient(
+            self.credential, self.subscription_id
+        )
+
+    def take_snapshot(self, backup_info, resource_group, disk_name, disk_id):
+        """
+        Take a snapshot of a managed disk in Azure.
+
+        :param barman.infofile.LocalBackupInfo backup_info: Backup information.
+        :param str resource_group: The resource_group to which the snapshot disks and
+            instance belong.
+        :param str disk_name: The name of the source disk for the snapshot.
+        :rtype: str
+        :return: The name used to reference the snapshot with Azure.
+        """
+        # TODO so here we are receiving an id, not a disk_name
+        snapshot_name = "%s-%s" % (disk_name, backup_info.backup_id.lower())
+        _logger.info("Taking snapshot '%s' of disk '%s'", snapshot_name, disk_name)
+        resp = self.client.snapshots.begin_create_or_update(
+            resource_group,
+            snapshot_name,
+            {
+                "location": "uksouth",
+                "incremental": True,
+                "creation_data": {"create_option": "Copy", "source_uri": disk_id},
+            },
+        )
+
+        _logger.info("Waiting for snapshot '%s' completion", snapshot_name)
+        resp.wait()
+
+        # TODO is this really the best way to check for success?
+        # and what do errors *actually* look like? the docs are unclear.
+        if resp.status().lower() != "succeeded":
+            raise CloudProviderError(
+                "Snapshot '%s' failed with error code %s: %s"
+                % (snapshot_name, resp.status(), resp.result())
+            )
+
+        _logger.info("Snapshot '%s' completed", snapshot_name)
+        return snapshot_name
+
+    def take_snapshot_backup(self, backup_info, instance_name, resource_group, disks):
+        """
+        Take a snapshot backup for the named instance.
+
+        Creates a snapshot for each named disk and saves the required metadata
+        to backup_info.snapshots_info as a AzureSnapshotsInfo object.
+
+        :param barman.infofile.LocalBackupInfo backup_info: Backup information.
+        :param str instance_name: The name of the VM instance to which the disks
+            to be backed up are attached.
+        :param str resource_group: The resource_group to which the snapshot disks and
+            instance belong.
+        :param list[str] disks: A list containing the names of the source disks.
+        """
+        instance_metadata = self.client.virtual_machines.get(
+            resource_group, instance_name
+        )
+        snapshots = []
+        for disk_name in disks:
+            attached_disks = [
+                d
+                for d in instance_metadata.storage_profile.data_disks
+                if d.name == disk_name
+            ]
+            if len(attached_disks) == 0:
+                raise SnapshotBackupException(
+                    "Disk %s not attached to instance %s" % (disk_name, instance_name)
+                )
+            # We should always have exactly one attached disk matching the name
+            assert len(attached_disks) == 1
+
+            snapshot_name = self.take_snapshot(
+                backup_info,
+                resource_group,
+                disk_name,
+                attached_disks[0].managed_disk.id,
+            )
+            snapshots.append(
+                AzureSnapshotMetadata(
+                    lun=attached_disks[0].lun,
+                    snapshot_name=snapshot_name,
+                    snapshot_resource_group=resource_group,
+                )
+            )
+
+        backup_info.snapshots_info = AzureSnapshotsInfo(
+            snapshots=snapshots, subscription_id=self.subscription_id
+        )
+
+    def delete_snapshot(self, snapshot_name, resource_group):
+        """
+        Delete the specified snapshot.
+
+        :param str snapshot_name: The short name used to reference the snapshot within
+            Azure.
+        """
+        try:
+            resp = self.client.snapshots.begin_delete(
+                resource_group,
+                snapshot_name,
+            )
+        except ResourceNotFoundError:
+            # This is only thrown if the *resource group* cannot be found. If the
+            # resource group exists but the snapshot doesn't, the operation will
+            # simply succeed.
+            raise
+
+        resp.wait()
+        if resp.status().lower() != "succeeded":
+            raise CloudProviderError(
+                "Deletion of snapshot %s failed with error code %s: %s"
+                % (snapshot_name, resp.status(), resp.result())
+            )
+
+        _logger.info("Snapshot %s deleted", snapshot_name)
+
+    def delete_snapshot_backup(self, backup_info):
+        """
+        Delete all snapshots for the supplied backup.
+
+        :param barman.infofile.LocalBackupInfo backup_info: Backup information.
+        """
+        for snapshot in backup_info.snapshots_info.snapshots:
+            _logger.info(
+                "Deleting snapshot '%s' for backup %s",
+                snapshot.identifier,
+                backup_info.backup_id,
+            )
+            self.delete_snapshot(snapshot.identifier, snapshot.snapshot_resource_group)
+
+    def get_attached_devices(self, instance_name, resource_group):
+        """
+        Returns the non-boot devices attached to instance_name in zone.
+
+        :param str instance_name: The name of the VM instance to which the disks
+            to be backed up are attached.
+        :param str resource_group: The resource_group to which the snapshot disks and
+            instance belong.
+        :rtype: dict[str,str]
+        :return: A dict where the key is the disk name and the value is the device
+            path for that disk on the specified instance.
+        """
+        instance_metadata = self.client.virtual_machines.get(
+            resource_group, instance_name
+        )
+        attached_devices = {}
+        # TODO With GCP, the device name is a canonical reference to the attachment
+        # of a given disk resource to a VM instance. Not so with Azure where it is
+        # the lun instead. From Barman's point of view it's kinda the same becuase
+        # it's the thing that provisioning needs to care about. But obviously we
+        # can't just say "oh well the code says device_name but really it's the lun"
+        # and must do something less awful.
+        for attached_disk in instance_metadata.storage_profile.data_disks:
+            attached_devices[attached_disk.name] = attached_disk.lun
+        return attached_devices
+
+    def get_attached_snapshots(self, instance_name, resource_group):
+        """
+        Returns the snapshots which are sources for disks attached to instance.
+
+        Queries the instance metadata to determine which disks are attached and
+        then queries the disk metadata for each disk to determine whether it was
+        cloned from a snapshot. If it was cloned then the snapshot is added to the
+        dict which is returned once all attached devices have been checked.
+
+        :param str instance_name: The name of the VM instance to which the disks
+            to be backed up are attached.
+        :param str resource_group: The resource_group to which the snapshot disks and
+            instance belong.
+        :rtype: dict[str,str]
+        :return: A dict where the key is the snapshot name and the value is the
+            device path for the source disk for that snapshot on the specified
+            instance.
+        """
+        attached_devices = self.get_attached_devices(instance_name, resource_group)
+        attached_snapshots = {}
+        for disk_name, lun in attached_devices.items():
+            disk_metadata = self.client.disks.get(resource_group, disk_name)
+            if (
+                disk_metadata.creation_data.create_option == "Copy"
+                and "providers/Microsoft.Compute/snapshots"
+                in disk_metadata.creation_data.source_resource_id
+            ):
+                # TODO amazingly, this doesn't work because sometimes the resource group
+                # name is lowercase and sometimes it's uppercase - nice!
+                # prefix = "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Compute/snapshots/".format(
+                #    self.subscription_id, resource_group
+                # )
+                # attached_snapshot_name = (
+                #    disk_metadata.creation_data.source_resource_id.split(prefix)[1]
+                # )
+                # So instead we'll just split on / and take the last thing
+                attached_snapshot_name = (
+                    disk_metadata.creation_data.source_resource_id.split("/")[-1]
+                )
+            else:
+                attached_snapshot_name = ""
+            if attached_snapshot_name != "":
+                attached_snapshots[attached_snapshot_name] = lun
+        return attached_snapshots
+
+    def instance_exists(self, instance_name, resource_group):
+        """
+        Determine whether the named instance exists in the specified zone.
+
+        :param str instance_name: The name of the VM instance to which the disks
+            to be backed up are attached.
+        :param str resource_group: The resource group to which the snapshot disks and
+            instance belong.
+        :rtype: bool
+        :return: True if the named instance exists in resource_group, False otherwise.
+        """
+        # TODO the mapping of zone to resource_group is a hack - conceptually they
+        # are used for a similar purpose (effectively namespacing actual resources)
+        # but we can't just pretend zones are resource groups
+        try:
+            self.client.virtual_machines.get(resource_group, instance_name)
+        except ResourceNotFoundError:
+            return False
+        return True
+
+
+class AzureSnapshotMetadata(SnapshotMetadata):
+    """
+    Specialization of SnapshotMetadata for Azure managed disk snapshots.
+
+    Stores the lun, snapshot_name and snapshot_resource_group in the provider-specific
+    field.
+    """
+
+    _provider_fields = ("lun", "snapshot_name", "snapshot_resource_group")
+
+    def __init__(
+        self,
+        mount_options=None,
+        mount_point=None,
+        lun=None,
+        snapshot_name=None,
+        snapshot_resource_group=None,
+    ):
+        """
+        Constructor saves additional metadata for GCP snapshots.
+
+        :param str mount_options: The mount options used for the source disk at the
+            time of the backup.
+        :param str mount_point: The mount point of the source disk at the time of
+            the backup.
+        :param int lun: The lun identifying the disk from which the snapshot was taken
+            on the instance it was attached to at the time of the backup.
+        :param str snapshot_name: The snapshot name used in the Azure API.
+        :param str snapshot_resource_group: The resource group name to which the
+            snapshot belongs.
+        """
+        super(AzureSnapshotMetadata, self).__init__(mount_options, mount_point)
+        self.lun = lun
+        self.snapshot_name = snapshot_name
+        self.snapshot_resource_group = snapshot_resource_group
+
+    @property
+    def identifier(self):
+        """
+        An identifier which can reference the snapshot via the cloud provider.
+
+        :rtype: str
+        :return: The snapshot short name.
+        """
+        return self.snapshot_name
+
+    @property
+    def device(self):
+        """
+        The device path to the source disk on the compute instance at the time the
+        backup was taken.
+
+        :rtype: int
+        :return: A unique identifier representing the disk as attached to the instance
+        """
+        # TODO this can't possibly ruin our day later on...
+        return self.lun
+
+
+class AzureSnapshotsInfo(SnapshotsInfo):
+    """
+    Represents the snapshots_info field for Azure managed disk snapshots.
+    """
+
+    _provider_fields = ("subscription_id",)
+    _snapshot_metadata_cls = AzureSnapshotMetadata
+
+    def __init__(self, snapshots=None, subscription_id=None):
+        """
+        Constructor saves the list of snapshots if it is provided.
+
+        :param list[SnapshotMetadata] snapshots: A list of metadata objects for each
+            snapshot.
+        """
+        super(AzureSnapshotsInfo, self).__init__(snapshots)
+        self.provider = "azure"
+        self.subscription_id = subscription_id

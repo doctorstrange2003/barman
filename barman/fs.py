@@ -367,6 +367,15 @@ class UnixLocalCommand(object):
         else:
             return output_fields
 
+    def readlink(self, path):
+        self.cmd("readlink", args=("-f", path))
+        output = self.internal_cmd.out.strip()
+        if output == path:
+            # Canonicalized link is the same as the path so it's not a link
+            # Something weird is afoot
+            raise FsOperationFailed("Path %s is not a symlink" % path)
+        return output
+
 
 class UnixRemoteCommand(UnixLocalCommand):
     """
