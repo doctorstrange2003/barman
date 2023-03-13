@@ -49,6 +49,9 @@ except ImportError:
     raise SystemExit("Missing required python module: boto3")
 
 
+_logger = logging.getLogger(__name__)
+
+
 class StreamingBodyIO(RawIOBase):
     """
     Wrap a boto StreamingBody in the IOBase API.
@@ -415,7 +418,7 @@ class AwsCloudSnapshotInterface(CloudSnapshotInterface):
         https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-creating-snapshot.html
     """
 
-    def __init__(self, profile_name, endpoint_url=None):
+    def __init__(self, profile_name=None, endpoint_url=None):
         """ """
         self.profile_name = profile_name
         self.endpoint_url = endpoint_url
@@ -431,10 +434,31 @@ class AwsCloudSnapshotInterface(CloudSnapshotInterface):
         :rtype: str
         :return: The name used to reference the snapshot with AWS.
         """
+        # TODO instead of a disk_zone and disk_name we just need a volume ID
+        # so this should be abscracted somehowe
+        # Also, why is this even part of the public interface given it's an
+        # internal detail of take_snapshot_backup?
         ec2_client = self.session.client(
             "ec2", region_name=disk_zone, endpoint_url=self.endpoint_url
         )
-        return "not an actual ID"
+        # TODO we should be more descriptive with the description
+        snapshot_description = "%s-%s" % (
+            disk_name,
+            backup_info.backup_id.lower(),
+        )
+        _logger.info(
+            "Taking snapshot '%s' of disk '%s'", snapshot_description, disk_name
+        )
+        resp = ec2_client.create_snapshot(
+            Description=snapshot_description,
+            VolumeId=disk_name,
+        )
+
+        # TODO Unlike both Gcp and Azure where we await each snapshot in serial, here
+        # we defer because we must instantiate a waiter ourselves and can give it
+        # multiple snapshot IDs
+        # we are going to have to figure out the status ourselves.
+        return resp["SnapshotId"]
 
     def take_snapshot_backup(self, backup_info, instance_name, zone, disks):
         """
@@ -449,6 +473,9 @@ class AwsCloudSnapshotInterface(CloudSnapshotInterface):
         :param str zone: The zone in which the snapshot disks and instance reside.
         :param list[str] disks: A list containing the names of the source disks.
         """
+        # TODO zone not needed here, only required for creating the client (which
+        # is actually a region anyway) - it's not needed for identifying the snapshot
+        # basically.
         ec2_client = self.session.client(
             "ec2", region_name=zone, endpoint_url=self.endpoint_url
         )
@@ -475,6 +502,18 @@ class AwsCloudSnapshotInterface(CloudSnapshotInterface):
                 )
             )
 
+        # Now await all the snapshots
+        snapshot_ids = [snapshot.identifier for snapshot in snapshots]
+        _logger.info("Waiting for snapshot '%s' completion", ", ".join(snapshot_ids))
+        waiter = ec2_client.get_waiter("snapshot_completed")
+        try:
+            waiter.wait(Filters=[{"Name": "snapshot-id", "Values": snapshot_ids}])
+        except ClientError as exc:
+            raise CloudProviderError(
+                "Snapshots failed with error code %s: %s"
+                % (exc.response["Error"]["Code"], exc.response["Error"])
+            )
+
         backup_info.snapshots_info = AwsSnapshotsInfo(snapshots=snapshots)
 
     def delete_snapshot(self, snapshot_name):
@@ -484,7 +523,23 @@ class AwsCloudSnapshotInterface(CloudSnapshotInterface):
         :param str snapshot_name: The short name used to reference the snapshot within
             AWS.
         """
-        pass
+        # TODO region must be saved in the snapshot metadata since it is necessary on
+        # AWS to connect to the right place
+        region = "eu-west-2"
+        ec2_client = self.session.client(
+            "ec2", region_name=region, endpoint_url=self.endpoint_url
+        )
+        # TODO snapshot_name is actually a snapshot_id
+        try:
+            ec2_client.delete_snapshot(SnapshotId=snapshot_name)
+        except ClientError as exc:
+            raise CloudProviderError(
+                "Deletion of snapshot %s failed with error code %s: %s"
+                % (snapshot_name, exc.response["Error"]["Code"], exc.response["Error"])
+            )
+        import pdb
+
+        pdb.set_trace()
 
     def delete_snapshot_backup(self, backup_info):
         """
@@ -492,7 +547,13 @@ class AwsCloudSnapshotInterface(CloudSnapshotInterface):
 
         :param barman.infofile.LocalBackupInfo backup_info: Backup information.
         """
-        pass
+        for snapshot in backup_info.snapshots_info.snapshots:
+            _logger.info(
+                "Deleting snapshot '%s' for backup %s",
+                snapshot.identifier,
+                backup_info.backup_id,
+            )
+            self.delete_snapshot(snapshot.identifier)
 
     def get_attached_devices(self, instance_name, zone):
         """
@@ -541,7 +602,18 @@ class AwsCloudSnapshotInterface(CloudSnapshotInterface):
             device path for the source disk for that snapshot on the specified
             instance.
         """
-        pass
+        attached_devices = self.get_attached_devices(instance_name, zone)
+
+        ec2_client = self.session.client(
+            "ec2", region_name=zone, endpoint_url=self.endpoint_url
+        )
+        attached_snapshots = {}
+        for volume_id, device_name in attached_devices.items():
+            # TODO here we get the disk metadata for determine what the sources are
+            resp = ec2_client.describe_volumes(VolumeIds=[volume_id])
+            if len(resp["Volumes"][0]["SnapshotId"]) > 0:
+                attached_snapshots[resp["Volumes"][0]["SnapshotId"]] = device_name
+        return attached_snapshots
 
     def instance_exists(self, instance_name, zone):
         """

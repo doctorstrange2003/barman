@@ -221,6 +221,15 @@ def get_snapshot_interface_from_backup_info(backup_info):
         )
 
         return AzureCloudSnapshotInterface(backup_info.snapshots_info.subscription_id)
+    elif backup_info.snapshots_info.provider == "aws":
+        from barman.cloud_providers.aws_s3 import (
+            AwsCloudSnapshotInterface,
+        )
+
+        # TODO this should support profile and endpoint, neither of which are saved in
+        # the snapshots metadata because they are runtime, not backup time, things.
+        # So this needs to accept a config.
+        return AwsCloudSnapshotInterface()
     else:
         raise CloudProviderUnsupported(
             "Unsupported snapshot provider in backup info: %s"
