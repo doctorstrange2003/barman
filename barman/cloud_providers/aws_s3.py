@@ -24,9 +24,13 @@ from barman.clients.cloud_compression import decompress_to_file
 from barman.cloud import (
     CloudInterface,
     CloudProviderError,
+    CloudSnapshotInterface,
     DecompressingStreamingIO,
     DEFAULT_DELIMITER,
+    SnapshotMetadata,
+    SnapshotsInfo,
 )
+from barman.exceptions import SnapshotBackupException
 
 
 try:
@@ -401,3 +405,239 @@ class S3CloudInterface(CloudInterface):
                     % (error_dict["Key"], error_dict["Code"], error_dict["Message"])
                 )
             raise CloudProviderError()
+
+
+class AwsCloudSnapshotInterface(CloudSnapshotInterface):
+    """
+    Implementation of CloudSnapshotInterface for EBS snapshots as implemented in AWS
+    as documented at:
+
+        https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-creating-snapshot.html
+    """
+
+    def __init__(self, profile_name, endpoint_url=None):
+        """ """
+        self.profile_name = profile_name
+        self.endpoint_url = endpoint_url
+        self.session = boto3.Session(profile_name=self.profile_name)
+
+    def take_snapshot(self, backup_info, disk_zone, disk_name):
+        """
+        Take a snapshot of an EBS volume in AWS.
+
+        :param barman.infofile.LocalBackupInfo backup_info: Backup information.
+        :param str disk_zone: The zone in which the disk resides.
+        :param str disk_name: The name of the source disk for the snapshot.
+        :rtype: str
+        :return: The name used to reference the snapshot with AWS.
+        """
+        ec2_client = self.session.client(
+            "ec2", region_name=disk_zone, endpoint_url=self.endpoint_url
+        )
+        return "not an actual ID"
+
+    def take_snapshot_backup(self, backup_info, instance_name, zone, disks):
+        """
+        Take a snapshot backup for the named instance.
+
+        Creates a snapshot for each named disk and saves the required metadata
+        to backup_info.snapshots_info as an AwsSnapshotsInfo object.
+
+        :param barman.infofile.LocalBackupInfo backup_info: Backup information.
+        :param str instance_name: The name of the VM instance to which the disks
+            to be backed up are attached.
+        :param str zone: The zone in which the snapshot disks and instance reside.
+        :param list[str] disks: A list containing the names of the source disks.
+        """
+        ec2_client = self.session.client(
+            "ec2", region_name=zone, endpoint_url=self.endpoint_url
+        )
+        resp = ec2_client.describe_instances(InstanceIds=[instance_name])
+        instance_metadata = resp["Reservations"][0]
+        disk_metadata = instance_metadata["Instances"][0]["BlockDeviceMappings"]
+        snapshots = []
+        # TODO disks are volume IDs here
+        for volume_id in disks:
+            attached_disks = [
+                d for d in disk_metadata if d["Ebs"]["VolumeId"] == volume_id
+            ]
+            if len(attached_disks) == 0:
+                raise SnapshotBackupException(
+                    "Disk %s not attached to instance %s" % (volume_id, instance_name)
+                )
+            assert len(attached_disks) == 1
+
+            snapshot_id = self.take_snapshot(backup_info, zone, volume_id)
+            snapshots.append(
+                AwsSnapshotMetadata(
+                    device_name=attached_disks[0]["DeviceName"],
+                    snapshot_id=snapshot_id,
+                )
+            )
+
+        backup_info.snapshots_info = AwsSnapshotsInfo(snapshots=snapshots)
+
+    def delete_snapshot(self, snapshot_name):
+        """
+        Delete the specified snapshot.
+
+        :param str snapshot_name: The short name used to reference the snapshot within
+            AWS.
+        """
+        pass
+
+    def delete_snapshot_backup(self, backup_info):
+        """
+        Delete all snapshots for the supplied backup.
+
+        :param barman.infofile.LocalBackupInfo backup_info: Backup information.
+        """
+        pass
+
+    def get_attached_devices(self, instance_name, zone):
+        """
+        Returns the non-boot devices attached to instance_name in zone.
+
+        :param str instance_name: The name of the VM instance to which the disks
+            to be backed up are attached.
+        :param str zone: The zone in which the snapshot disks and instance reside.
+        :rtype: dict[str,str]
+        :return: A dict where the key is the disk name and the value is the device
+            path for that disk on the specified instance.
+        """
+        # TODO on AWS this function will include the boot device
+        # not a technical problem but means we're now lying
+
+        ec2_client = self.session.client(
+            "ec2", region_name=zone, endpoint_url=self.endpoint_url
+        )
+        resp = ec2_client.describe_instances(InstanceIds=[instance_name])
+        assert len(resp["Reservations"]) == 1
+        instance_metadata = resp["Reservations"][0]
+        attached_devices = {}
+        # TODO can't just assume 0 here
+        for device in instance_metadata["Instances"][0]["BlockDeviceMappings"]:
+            volume_id = device["Ebs"]["VolumeId"]
+            # TODO we'd need to do another lookup to get a friendly disk name, so
+            # perhaps we just work with IDs for now
+            device_name = device["DeviceName"]
+            attached_devices[volume_id] = device_name
+        return attached_devices
+
+    def get_attached_snapshots(self, instance_name, zone):
+        """
+        Returns the snapshots which are sources for disks attached to instance.
+
+        Queries the instance metadata to determine which disks are attached and
+        then queries the disk metadata for each disk to determine whether it was
+        cloned from a snapshot. If it was cloned then the snapshot is added to the
+        dict which is returned once all attached devices have been checked.
+
+        :param str instance_name: The name of the VM instance to which the disks
+            to be backed up are attached.
+        :param str zone: The zone in which the snapshot disks and instance reside.
+        :rtype: dict[str,str]
+        :return: A dict where the key is the snapshot name and the value is the
+            device path for the source disk for that snapshot on the specified
+            instance.
+        """
+        pass
+
+    def instance_exists(self, instance_name, zone):
+        """
+        Determine whether the named instance exists in the specified zone.
+
+        :param str instance_name: The name of the VM instance to which the disks
+            to be backed up are attached.
+        :param str zone: The zone in which the snapshot disks and instance reside.
+        :rtype: bool
+        :return: True if the named instance exists in zone, False otherwise.
+        """
+        # TODO here we are accepting a region, not a zone
+        # TODO the instance_name is actually an instance_id
+
+        # TODO this should be cached and created on init
+        ec2_client = self.session.client(
+            "ec2", region_name=zone, endpoint_url=self.endpoint_url
+        )
+        try:
+            ec2_client.describe_instances(InstanceIds=[instance_name])
+        except ClientError as exc:
+            error_code = exc.response["Error"]["Code"]
+            if error_code == "InvalidInstanceID.NotFound":
+                return False
+            else:
+                raise
+        return True
+
+
+class AwsSnapshotMetadata(SnapshotMetadata):
+    """
+    Specialization of SnapshotMetadata for AWS EBS snapshots.
+
+    Stores the device_name and snapshot_name in the provider-specific field.
+    """
+
+    _provider_fields = ("device_name", "snapshot_id")
+
+    def __init__(
+        self,
+        mount_options=None,
+        mount_point=None,
+        device_name=None,
+        snapshot_id=None,
+    ):
+        """
+        Constructor saves additional metadata for AWS snapshots.
+
+        :param str mount_options: The mount options used for the source disk at the
+            time of the backup.
+        :param str mount_point: The mount point of the source disk at the time of
+            the backup.
+        :param str device_name: The device name used in the AWS API.
+        :param str snapshot_name: The snapshot name used in the AWS API.
+        :param str project: The AWS project name.
+        """
+        super(AwsSnapshotMetadata, self).__init__(mount_options, mount_point)
+        self.device_name = device_name
+        self.snapshot_id = snapshot_id
+
+    @property
+    def identifier(self):
+        """
+        An identifier which can reference the snapshot via the cloud provider.
+
+        :rtype: str
+        :return: The snapshot ID.
+        """
+        return self.snapshot_id
+
+    @property
+    def device(self):
+        """
+        The device path to the source disk on the compute instance at the time the
+        backup was taken.
+
+        :rtype: str
+        :return: The full path to the source disk device.
+        """
+        return self.device_name
+
+
+class AwsSnapshotsInfo(SnapshotsInfo):
+    """
+    Represents the snapshots_info field for AWS EBS snapshots.
+    """
+
+    _provider_fields = ()
+    _snapshot_metadata_cls = AwsSnapshotMetadata
+
+    def __init__(self, snapshots=None):
+        """
+        Constructor saves the list of snapshots if it is provided.
+
+        :param list[SnapshotMetadata] snapshots: A list of metadata objects for each
+            snapshot.
+        """
+        super(AwsSnapshotsInfo, self).__init__(snapshots)
+        self.provider = "aws"

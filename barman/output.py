@@ -744,8 +744,11 @@ class ConsoleOutputWriter(object):
             for key, value in backup_info["snapshots_info"].items():
                 if key != "snapshots" and key != "provider_info":
                     output_fun(nested_row.format(key, value))
-            for key, value in backup_info["snapshots_info"]["provider_info"].items():
-                output_fun(nested_row.format(key, value))
+            if "provider_info" in backup_info["snapshots_info"]:
+                for key, value in backup_info["snapshots_info"][
+                    "provider_info"
+                ].items():
+                    output_fun(nested_row.format(key, value))
             output_fun("")
             for metadata in backup_info["snapshots_info"]["snapshots"]:
                 for key, value in sorted(metadata["provider"].items()):
