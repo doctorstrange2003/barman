@@ -483,7 +483,7 @@ class GcpCloudSnapshotInterface(CloudSnapshotInterface):
         _logger.info("Snapshot '%s' completed", snapshot_name)
         return snapshot_name
 
-    def take_snapshot_backup(self, backup_info, instance_name, zone, disks):
+    def take_snapshot_backup(self, backup_info, instance_name, disks, zone):
         """
         Take a snapshot backup for the named instance.
 
@@ -493,8 +493,8 @@ class GcpCloudSnapshotInterface(CloudSnapshotInterface):
         :param barman.infofile.LocalBackupInfo backup_info: Backup information.
         :param str instance_name: The name of the VM instance to which the disks
             to be backed up are attached.
-        :param str zone: The zone in which the snapshot disks and instance reside.
         :param list[str] disks: A list containing the names of the source disks.
+        :param str zone: The zone in which the snapshot disks and instance reside.
         """
         instance_metadata = self._get_instance_metadata(instance_name, zone)
         snapshots = []
