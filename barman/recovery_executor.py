@@ -51,6 +51,7 @@ from barman.exceptions import (
     RecoveryStandbyModeException,
     RecoveryTargetActionException,
     RecoveryPreconditionException,
+    SnapshotBackupException,
 )
 from barman.compression import GZipCompression, LZ4Compression, ZSTDCompression
 import barman.fs as fs
@@ -1543,9 +1544,7 @@ class SnapshotRecoveryExecutor(RemoteConfigRecoveryExecutor):
             raise RecoveryPreconditionException(message)
 
     @staticmethod
-    def get_attached_snapshots_for_backup(
-        snapshot_interface, backup_info, instance_name
-    ):
+    def get_attached_volumes_for_backup(snapshot_interface, backup_info, instance_name):
         """
         Verifies that disks cloned from the snapshots specified in the supplied
         backup_info are attached to the named instance and returns them as a dict
@@ -1569,15 +1568,20 @@ class SnapshotRecoveryExecutor(RemoteConfigRecoveryExecutor):
         """
         if backup_info.snapshots_info is None:
             return {}
-        attached_snapshots = snapshot_interface.get_attached_snapshots(instance_name)
+        attached_volumes = snapshot_interface.get_attached_volumes(instance_name)
         attached_snapshots_for_backup = {}
         missing_snapshots = []
         for source_snapshot in backup_info.snapshots_info.snapshots:
             try:
+                attached_volume = [
+                    v
+                    for v in attached_volumes.values()
+                    if v.source_snapshot == source_snapshot.identifier
+                ][0]
                 attached_snapshots_for_backup[
                     source_snapshot.identifier
-                ] = attached_snapshots[source_snapshot.identifier]
-            except KeyError:
+                ] = attached_volume
+            except IndexError:
                 missing_snapshots.append(source_snapshot.identifier)
 
         if len(missing_snapshots) > 0:
@@ -1589,7 +1593,7 @@ class SnapshotRecoveryExecutor(RemoteConfigRecoveryExecutor):
             return attached_snapshots_for_backup
 
     @staticmethod
-    def check_mount_points(backup_info, attached_snapshots, cmd):
+    def check_mount_points(backup_info, attached_volumes, cmd):
         """
         Check that each disk cloned from a snapshot is mounted at the same mount point
         as the original disk and with the same mount options.
@@ -1608,36 +1612,43 @@ class SnapshotRecoveryExecutor(RemoteConfigRecoveryExecutor):
         """
         mount_point_errors = []
         mount_options_errors = []
-        for snapshot, device in sorted(attached_snapshots.items()):
+        for disk, volume in sorted(attached_volumes.items()):
             try:
-                mount_point, mount_options = cmd.findmnt(device)
-            except CommandException as e:
+                mount_point = volume.get_mount_point(cmd)
+                mount_options = volume.get_mount_options(cmd)
+            except SnapshotBackupException as e:
                 mount_point_errors.append(
-                    "Error finding mount point for device %s: %s" % (device, e)
+                    "Error finding mount point for disk %s: %s" % (volume.disk, e)
                 )
                 continue
             if mount_point is None:
                 mount_point_errors.append(
-                    "Could not find device %s at any mount point" % device
+                    "Could not find disk %s at any mount point" % volume.disk
                 )
                 continue
             snapshot_metadata = next(
                 metadata
                 for metadata in backup_info.snapshots_info.snapshots
-                if metadata.identifier == snapshot
+                if metadata.identifier == volume.source_snapshot
             )
             expected_mount_point = snapshot_metadata.mount_point
             expected_mount_options = snapshot_metadata.mount_options
             if mount_point != expected_mount_point:
                 mount_point_errors.append(
-                    "Device %s cloned from snapshot %s is mounted at %s but %s was "
-                    "expected." % (device, snapshot, mount_point, expected_mount_point)
+                    "Disk %s cloned from snapshot %s is mounted at %s but %s was "
+                    "expected."
+                    % (disk, volume.source_snapshot, mount_point, expected_mount_point)
                 )
             if mount_options != expected_mount_options:
                 mount_options_errors.append(
-                    "Device %s cloned from snapshot %s is mounted with %s but %s was "
+                    "Disk %s cloned from snapshot %s is mounted with %s but %s was "
                     "expected."
-                    % (device, snapshot, mount_options, expected_mount_options)
+                    % (
+                        disk,
+                        volume.source_snapshot,
+                        mount_options,
+                        expected_mount_options,
+                    )
                 )
         if len(mount_point_errors) > 0:
             raise RecoveryPreconditionException(
@@ -1699,13 +1710,11 @@ class SnapshotRecoveryExecutor(RemoteConfigRecoveryExecutor):
         snapshot_interface = get_snapshot_interface_from_backup_info(
             backup_info, provider_args
         )
-        attached_snapshots = self.get_attached_snapshots_for_backup(
+        attached_volumes = self.get_attached_volumes_for_backup(
             snapshot_interface, backup_info, recovery_instance
         )
         cmd = fs.unix_command_factory(remote_command, self.server.path)
-        SnapshotRecoveryExecutor.check_mount_points(
-            backup_info, attached_snapshots, cmd
-        )
+        SnapshotRecoveryExecutor.check_mount_points(backup_info, attached_volumes, cmd)
         self.check_recovery_dir_exists(dest, cmd)
 
         return super(SnapshotRecoveryExecutor, self).recover(

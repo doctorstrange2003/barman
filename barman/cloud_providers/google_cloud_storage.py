@@ -29,8 +29,9 @@ from barman.cloud import (
     DEFAULT_DELIMITER,
     SnapshotMetadata,
     SnapshotsInfo,
+    VolumeMetadata,
 )
-from barman.exceptions import SnapshotBackupException
+from barman.exceptions import CommandException, SnapshotBackupException
 
 try:
     # Python 3.x
@@ -514,11 +515,18 @@ class GcpCloudSnapshotInterface(CloudSnapshotInterface):
             assert len(attached_disks) == 1
 
             snapshot_name = self._take_snapshot(backup_info, self.zone, disk_name)
+
+            # Save useful metadata
+            attachment_metadata = [
+                d for d in instance_metadata.disks if d.source.endswith(disk_name)
+            ][0]
+            volume_metadata = GcpVolumeMetadata(attachment_metadata, disk_metadata)
             snapshots.append(
                 GcpSnapshotMetadata(
-                    device_name=attached_disks[0].device_name,
                     snapshot_name=snapshot_name,
                     snapshot_project=self.project,
+                    device_name=attachment_metadata.device_name,
+                    volume_metadata=volume_metadata,
                 )
             )
 
@@ -577,69 +585,31 @@ class GcpCloudSnapshotInterface(CloudSnapshotInterface):
             )
             self._delete_snapshot(snapshot.identifier)
 
-    def get_attached_devices(self, instance_name):
-        """
-        Returns the non-boot devices attached to instance_name.
-
-        :param str instance_name: The name of the VM instance to which the disks
-            to be backed up are attached.
-        :rtype: dict[str,str]
-        :return: A dict where the key is the disk name and the value is the device
-            path for that disk on the specified instance.
-        """
+    def get_attached_volumes(self, instance_name):
         instance_metadata = self._get_instance_metadata(instance_name)
-        attached_devices = {}
-        for attached_disk in instance_metadata.disks:
-            disk_name = posixpath.split(urlparse(attached_disk.source).path)[-1]
+        attached_volumes = {}
+        for attachment_metadata in instance_metadata.disks:
+            disk_name = posixpath.split(urlparse(attachment_metadata.source).path)[-1]
             if disk_name == "":
                 raise SnapshotBackupException(
                     "Could not parse disk name for source %s attached to instance %s"
-                    % (attached_disk.source, instance_name)
+                    % (attachment_metadata.source, instance_name)
                 )
-            full_device_name = self.DEVICE_PREFIX + attached_disk.device_name
-            if disk_name in attached_devices:
+            if disk_name in attached_volumes:
                 raise SnapshotBackupException(
-                    "Disk %s appears to be attached with name %s as devices %s and %s"
+                    "Disk %s already attached to instance %s with name %s"
                     % (
-                        attached_disk.source,
+                        attachment_metadata.source,
+                        instance_name,
                         disk_name,
-                        full_device_name,
-                        attached_devices[disk_name],
                     )
                 )
-            attached_devices[disk_name] = full_device_name
-
-        return attached_devices
-
-    def get_attached_snapshots(self, instance_name):
-        """
-        Returns the snapshots which are sources for disks attached to instance.
-
-        Queries the instance metadata to determine which disks are attached and
-        then queries the disk metadata for each disk to determine whether it was
-        cloned from a snapshot. If it was cloned then the snapshot is added to the
-        dict which is returned once all attached devices have been checked.
-
-        :param str instance_name: The name of the VM instance to which the disks
-            to be backed up are attached.
-        :rtype: dict[str,str]
-        :return: A dict where the key is the snapshot name and the value is the
-            device path for the source disk for that snapshot on the specified
-            instance.
-        """
-        attached_devices = self.get_attached_devices(instance_name)
-        attached_snapshots = {}
-        for disk_name, device_name in attached_devices.items():
             disk_metadata = self._get_disk_metadata(disk_name)
-            if disk_metadata.source_snapshot is not None:
-                attached_snapshot_name = posixpath.split(
-                    urlparse(disk_metadata.source_snapshot).path
-                )[-1]
-            else:
-                attached_snapshot_name = ""
-            if attached_snapshot_name != "":
-                attached_snapshots[attached_snapshot_name] = device_name
-        return attached_snapshots
+            attached_volumes[disk_name] = GcpVolumeMetadata(
+                attachment_metadata,
+                disk_metadata,
+            )
+        return attached_volumes
 
     def instance_exists(self, instance_name):
         """
@@ -661,6 +631,59 @@ class GcpCloudSnapshotInterface(CloudSnapshotInterface):
         return True
 
 
+class GcpVolumeMetadata(VolumeMetadata):
+    """
+    Specialization of SnapshotMetadata for GCP persistent disk snapshots.
+
+    Retains the device_name as a private field so that it can be used to resolve the
+    mount point and mount options.
+    """
+
+    def __init__(self, attachment_metadata=None, disk_metadata=None):
+        super(GcpVolumeMetadata, self).__init__()
+        self._snapshot_name = None
+        self._device_path = None
+        self.disk = disk_metadata.name
+        if attachment_metadata is not None:
+            self._device_path = (
+                GcpCloudSnapshotInterface.DEVICE_PREFIX
+                + attachment_metadata.device_name
+            )
+        if disk_metadata is not None:
+            if disk_metadata.source_snapshot is not None:
+                attached_snapshot_name = posixpath.split(
+                    urlparse(disk_metadata.source_snapshot).path
+                )[-1]
+            else:
+                attached_snapshot_name = ""
+            if attached_snapshot_name != "":
+                self._snapshot_name = attached_snapshot_name
+
+    def _resolve_mount_info(self, cmd):
+        try:
+            mount_point, mount_options = cmd.findmnt(self._device_path)
+        except CommandException as e:
+            raise SnapshotBackupException(
+                "Error finding mount point for device %s: %s" % (self._device_path, e)
+            )
+        if mount_point is None:
+            raise SnapshotBackupException(
+                "Could not find device %s at any mount point" % self._device_path
+            )
+        self._mount_point = mount_point
+        self._mount_options = mount_options
+
+    @property
+    def source_snapshot(self):
+        """
+        An identifier which can reference the snapshot via the cloud provider.
+
+        :rtype: str
+        :return: The snapshot short name.
+        """
+        return self._snapshot_name
+
+
 class GcpSnapshotMetadata(SnapshotMetadata):
     """
     Specialization of SnapshotMetadata for GCP persistent disk snapshots.
@@ -679,6 +702,7 @@ class GcpSnapshotMetadata(SnapshotMetadata):
         device_name=None,
         snapshot_name=None,
         snapshot_project=None,
+        volume_metadata=None,
     ):
         """
         Constructor saves additional metadata for GCP snapshots.
@@ -691,7 +715,9 @@ class GcpSnapshotMetadata(SnapshotMetadata):
         :param str snapshot_name: The short snapshot name used in the GCP API.
         :param str project: The GCP project name.
         """
-        super(GcpSnapshotMetadata, self).__init__(mount_options, mount_point)
+        super(GcpSnapshotMetadata, self).__init__(
+            mount_options, mount_point, volume_metadata
+        )
         self.device_name = device_name
         self.snapshot_name = snapshot_name
         self.snapshot_project = snapshot_project
@@ -705,17 +731,6 @@ class GcpSnapshotMetadata(SnapshotMetadata):
         :return: The snapshot short name.
         """
         return self.snapshot_name
-
-    @property
-    def device(self):
-        """
-        The device path to the source disk on the compute instance at the time the
-        backup was taken.
-
-        :rtype: str
-        :return: The full path to the source disk device.
-        """
-        return GcpCloudSnapshotInterface.DEVICE_PREFIX + self.device_name
 
 
 class GcpSnapshotsInfo(SnapshotsInfo):

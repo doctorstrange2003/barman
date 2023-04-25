@@ -1503,10 +1503,12 @@ class SnapshotBackupExecutor(ExternalBackupExecutor):
         :param UnixLocalCommand remote_cmd: Wrapper for local/remote commands.
         """
         for snapshot in backup_info.snapshots_info.snapshots:
-            mount_point, mount_options = remote_cmd.findmnt(snapshot.device)
+            mount_point = snapshot.volume_metadata.get_mount_point(remote_cmd)
+            mount_options = snapshot.volume_metadata.get_mount_options(remote_cmd)
             if mount_point is None:
                 raise BackupException(
-                    "Could not find mount point for device %s" % snapshot.device
+                    "Could not find mount point for disk %s"
+                    % snapshot.volume_metadata.disk
                 )
             else:
                 snapshot.mount_point = mount_point
@@ -1566,16 +1568,16 @@ class SnapshotBackupExecutor(ExternalBackupExecutor):
             attached to the VM instance and the second element is a list of all disks
             which are attached but not mounted.
         """
-        attached_devices = snapshot_interface.get_attached_devices(snapshot_instance)
+        attached_volumes = snapshot_interface.get_attached_volumes(snapshot_instance)
         missing_disks = []
         for disk in snapshot_disks:
-            if disk not in attached_devices.keys():
+            if disk not in attached_volumes.keys():
                 missing_disks.append(disk)
 
         unmounted_disks = []
         for disk in snapshot_disks:
             try:
-                mount_point, _mount_options = cmd.findmnt(attached_devices[disk])
+                mount_point = attached_volumes[disk].get_mount_point(cmd)
             except KeyError:
                 # Ignore disks which were not attached
                 continue

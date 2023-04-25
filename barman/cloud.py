@@ -2234,35 +2234,13 @@ class CloudSnapshotInterface(with_metaclass(ABCMeta)):
         """
 
     @abstractmethod
-    def get_attached_devices(self, instance_name):
+    def get_attached_volumes(self, instance_name):
         """
-        Returns the non-boot devices attached to instance_name.
+        Returns metadata for the volumes attached to this instance.
 
-        Implementations must return a dict where the key is the name of the attached
-        disk and the value is the full path to the device at which the disk is attached
-        on the instance.
-
-        :param str instance_name: The name of the VM instance to which the disks
-            to be backed up are attached.
-        :rtype: dict[str,str]
-        :return: A dict where the key is the disk name and the value is the device
-            path for that disk on the specified instance.
-        """
-
-    @abstractmethod
-    def get_attached_snapshots(self, instance_name):
-        """
-        Returns the snapshots which are sources for disks attached to instance.
-
-        Implementations must return each snapshot which is the source for a disk
-        attache to the instance along with the device path at which it is attached.
-
-        :param str instance_name: The name of the VM instance to which the disks
-            to be backed up are attached.
-        :rtype: dict[str,str]
-        :return: A dict where the key is the snapshot name and the value is the
-            device path for the source disk for that snapshot on the specified
-            instance.
+        :rtype: dict[str, VolumeMetadata]
+        :return: A dict of VolumeMetadata objects representing each volume
+            attached to the instance, keyed by volume identifier.
         """
 
     @abstractmethod
@@ -2275,6 +2253,56 @@ class CloudSnapshotInterface(with_metaclass(ABCMeta)):
         :rtype: bool
         :return: True if the named instance exists, False otherwise.
         """
+
+
+class VolumeMetadata(object):
+    """
+    Represents metadata for a single volume attached to a cloud VM.
+    """
+
+    def __init__(self):
+        self.cmd = None
+        self._mount_point = None
+        self._mount_options = None
+
+    @abstractmethod
+    def _resolve_mount_info(self):
+        """
+        This method must use self.cmd together with any additional private properties
+        available in the provider-specific implementation in order to resolve the
+        mount point and mount options for this volume.
+        """
+
+    @abstractproperty
+    def source_snapshot(self):
+        """
+        The source snapshot from which this volume was cloned.
+
+        :rtype: str|None
+        :return: A snapshot identifier.
+        """
+
+    def get_mount_point(self, cmd):
+        """
+        The mount point at which this volume is currently mounted.
+
+        This must be resolved using metadata obtained from the cloud provider which
+        describes how the volume is attached to the VM.
+        """
+        if self._mount_point is None:
+            self._resolve_mount_info(cmd)
+        return self._mount_point
+
+    def get_mount_options(self, cmd):
+        """
+        The mount options with which this device is currently mounted.
+
+        This must be resolved using metadata obtained from the cloud provider which
+        describes how the volume is attached to the VM.
+        """
+        if self._mount_options is None:
+            self._resolve_mount_info(cmd)
+        return self._mount_options
 
 
 class SnapshotMetadata(object):
@@ -2303,7 +2331,7 @@ class SnapshotMetadata(object):
 
     _provider_fields = ()
 
-    def __init__(self, mount_options=None, mount_point=None):
+    def __init__(self, mount_options=None, mount_point=None, volume_metadata=None):
         """
         Constructor accepts properties generic to all snapshot providers.
 
@@ -2314,6 +2342,7 @@ class SnapshotMetadata(object):
         """
         self.mount_options = mount_options
         self.mount_point = mount_point
+        self.volume_metadata = volume_metadata
 
     @classmethod
     def from_dict(cls, info):

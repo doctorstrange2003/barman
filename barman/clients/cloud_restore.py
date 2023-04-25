@@ -320,7 +320,7 @@ class CloudBackupDownloaderSnapshot(CloudBackupDownloader):
         snapshot_interface = get_snapshot_interface_from_backup_info(
             backup_info, provider_args
         )
-        attached_snapshots = SnapshotRecoveryExecutor.get_attached_snapshots_for_backup(
+        attached_snapshots = SnapshotRecoveryExecutor.get_attached_volumes_for_backup(
             snapshot_interface,
             backup_info,
             recovery_instance,
