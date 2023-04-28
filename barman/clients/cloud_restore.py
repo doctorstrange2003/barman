@@ -104,7 +104,11 @@ def main(args=None):
                 downloader = CloudBackupDownloaderSnapshot(cloud_interface, catalog)
                 provider_args = {}
                 for arg in vars(config):
-                    provider_args[arg] = getattr(config, arg)
+                    if (
+                        arg.startswith("snapshot_")
+                        and arg != "snapshot_recovery_instance"
+                    ):
+                        provider_args[arg] = getattr(config, arg)
                 downloader.download_backup(
                     backup_info,
                     config.recovery_dir,
