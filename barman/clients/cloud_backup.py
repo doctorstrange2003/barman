@@ -391,6 +391,11 @@ def parse_arguments(args=None):
         help="Azure subscription ID which identifies the Microsoft Azure subscription "
         "used for accessing snapshot-related resources.",
     )
+    azure_arguments.add_argument(
+        "--snapshot-azure-resource-group",
+        help="Azure resource group ID which identifies the resource group to which "
+        "snapshot-related resources belong.",
+    )
     return parser.parse_args(args=args)
 
 

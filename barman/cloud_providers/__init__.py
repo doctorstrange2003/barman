@@ -181,7 +181,9 @@ def get_snapshot_interface(config):
             AzureCloudSnapshotInterface,
         )
 
-        return AzureCloudSnapshotInterface(config.snapshot_azure_subscription_id)
+        return AzureCloudSnapshotInterface(
+            config.snapshot_azure_subscription_id, config.snapshot_azure_resource_group
+        )
     else:
         raise CloudProviderUnsupported(
             "No snapshot provider for cloud provider: %s" % config.cloud_provider
@@ -252,7 +254,10 @@ def get_snapshot_interface_from_backup_info(backup_info, provider_args=None):
         )
 
         # TODO is subscription_id specific to the snapshot or the authed user?
-        return AzureCloudSnapshotInterface(backup_info.snapshots_info.subscription_id)
+        return AzureCloudSnapshotInterface(
+            backup_info.snapshots_info.subscription_id, # TODO should use the one in provider args not this one
+            provider_args["snapshot_azure_resource_group"], # TODO we use the provider args one here BUT when looking up the snapshots we should be aware the resource group could be different
+        )
     else:
         raise CloudProviderUnsupported(
             "Unsupported snapshot provider in backup info: %s"
