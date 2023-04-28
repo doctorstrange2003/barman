@@ -52,6 +52,7 @@ from barman.exceptions import (
     FsOperationFailed,
     PostgresConnectionError,
     PostgresIsInRecovery,
+    SnapshotBackupException,
     SshCommandException,
     FileNotFoundException,
 )
@@ -1489,7 +1490,7 @@ class SnapshotBackupExecutor(ExternalBackupExecutor):
                 )
 
     @staticmethod
-    def add_mount_data_to_backup_info(backup_info, remote_cmd):
+    def add_mount_data_to_volume_metadata(volumes, remote_cmd):
         """
         Adds the mount point and mount options for each disk to the backup info.
 
@@ -1502,17 +1503,8 @@ class SnapshotBackupExecutor(ExternalBackupExecutor):
         :param barman.infofile.LocalBackupInfo backup_info: Backup information.
         :param UnixLocalCommand remote_cmd: Wrapper for local/remote commands.
         """
-        for snapshot in backup_info.snapshots_info.snapshots:
-            mount_point = snapshot.volume_metadata.get_mount_point(remote_cmd)
-            mount_options = snapshot.volume_metadata.get_mount_options(remote_cmd)
-            if mount_point is None:
-                raise BackupException(
-                    "Could not find mount point for disk %s"
-                    % snapshot.volume_metadata.disk
-                )
-            else:
-                snapshot.mount_point = mount_point
-                snapshot.mount_options = mount_options
+        for volume in volumes.values():
+            volume.resolve_mounted_volume(remote_cmd)
 
     def backup_copy(self, backup_info):
         """
@@ -1527,15 +1519,22 @@ class SnapshotBackupExecutor(ExternalBackupExecutor):
         # Start the snapshot
         self.copy_start_time = datetime.datetime.now()
 
+        # Get volume metadata for the disks to be backed up
+        volumes_to_snapshot = self.snapshot_interface.get_attached_volumes(
+            self.snapshot_instance, self.snapshot_disks
+        )
+
+        # Resolve volume metadata to mount metadata
+        remote_cmd = UnixRemoteCommand(ssh_command=self.server.config.ssh_command)
+        self.add_mount_data_to_volume_metadata(volumes_to_snapshot, remote_cmd)
+
         self.snapshot_interface.take_snapshot_backup(
-            backup_info, self.snapshot_instance, self.snapshot_disks
+            backup_info,
+            self.snapshot_instance,
+            volumes_to_snapshot,
         )
 
         self.copy_end_time = datetime.datetime.now()
-
-        # Gather additional metadata to assist recovery of snapshots
-        remote_cmd = UnixRemoteCommand(ssh_command=self.server.config.ssh_command)
-        self.add_mount_data_to_backup_info(backup_info, remote_cmd)
 
         # Store statistics about the copy
         copy_time = total_seconds(self.copy_end_time - self.copy_start_time)
@@ -1577,10 +1576,13 @@ class SnapshotBackupExecutor(ExternalBackupExecutor):
         unmounted_disks = []
         for disk in snapshot_disks:
             try:
-                mount_point = attached_volumes[disk].get_mount_point(cmd)
+                attached_volumes[disk].resolve_mounted_volume(cmd)
+                mount_point = attached_volumes[disk].mount_point
             except KeyError:
                 # Ignore disks which were not attached
                 continue
+            except SnapshotBackupException:
+                mount_point = None
             if mount_point is None:
                 unmounted_disks.append(disk)
 

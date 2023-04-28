@@ -1614,8 +1614,9 @@ class SnapshotRecoveryExecutor(RemoteConfigRecoveryExecutor):
         mount_options_errors = []
         for disk, volume in sorted(attached_volumes.items()):
             try:
-                mount_point = volume.get_mount_point(cmd)
-                mount_options = volume.get_mount_options(cmd)
+                volume.resolve_mounted_volume(cmd)
+                mount_point = volume.mount_point
+                mount_options = volume.mount_options
             except SnapshotBackupException as e:
                 mount_point_errors.append(
                     "Error finding mount point for disk %s: %s" % (volume.disk, e)

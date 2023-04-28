@@ -1874,8 +1874,7 @@ class CloudBackupSnapshot(CloudBackup):
         For snapshot backups this means gathering the mount point and mount options
         from the local node.
         """
-        cmd = UnixLocalCommand()
-        SnapshotBackupExecutor.add_mount_data_to_backup_info(self.backup_info, cmd)
+        pass
 
     def _add_stats_to_backup_info(self):
         """
@@ -1912,10 +1911,17 @@ class CloudBackupSnapshot(CloudBackup):
         """
         Make a backup by creating snapshots of the specified disks.
         """
+        volumes_to_snapshot = self.snapshot_interface.get_attached_volumes(
+            self.snapshot_instance, self.snapshot_disks
+        )
+        cmd = UnixLocalCommand()
+        SnapshotBackupExecutor.add_mount_data_to_volume_metadata(
+            volumes_to_snapshot, cmd
+        )
         self.snapshot_interface.take_snapshot_backup(
             self.backup_info,
             self.snapshot_instance,
-            self.snapshot_disks,
+            volumes_to_snapshot,
         )
 
     # The following method implements specific functionality for snapshot backups.
@@ -2266,7 +2272,7 @@ class VolumeMetadata(object):
         self._mount_options = None
 
     @abstractmethod
-    def _resolve_mount_info(self):
+    def resolve_mounted_volume(self):
         """
         This method must use self.cmd together with any additional private properties
         available in the provider-specific implementation in order to resolve the
@@ -2282,26 +2288,24 @@ class VolumeMetadata(object):
         :return: A snapshot identifier.
         """
 
-    def get_mount_point(self, cmd):
+    @abstractproperty
+    def mount_point(self):
         """
         The mount point at which this volume is currently mounted.
 
         This must be resolved using metadata obtained from the cloud provider which
         describes how the volume is attached to the VM.
         """
-        if self._mount_point is None:
-            self._resolve_mount_info(cmd)
         return self._mount_point
 
-    def get_mount_options(self, cmd):
+    @abstractproperty
+    def mount_options(self):
         """
         The mount options with which this device is currently mounted.
 
         This must be resolved using metadata obtained from the cloud provider which
         describes how the volume is attached to the VM.
         """
-        if self._mount_options is None:
-            self._resolve_mount_info(cmd)
         return self._mount_options
 
 

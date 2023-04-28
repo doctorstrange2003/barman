@@ -485,7 +485,7 @@ class GcpCloudSnapshotInterface(CloudSnapshotInterface):
         _logger.info("Snapshot '%s' completed", snapshot_name)
         return snapshot_name
 
-    def take_snapshot_backup(self, backup_info, instance_name, disks):
+    def take_snapshot_backup(self, backup_info, instance_name, volumes):
         """
         Take a snapshot backup for the named instance.
 
@@ -499,34 +499,20 @@ class GcpCloudSnapshotInterface(CloudSnapshotInterface):
         """
         instance_metadata = self._get_instance_metadata(instance_name)
         snapshots = []
-        for disk_name in disks:
-            disk_metadata = self._get_disk_metadata(disk_name)
-            # Check disk is attached and find device name
-            attached_disks = [
-                d
-                for d in instance_metadata.disks
-                if d.source == disk_metadata.self_link
-            ]
-            if len(attached_disks) == 0:
-                raise SnapshotBackupException(
-                    "Disk %s not attached to instance %s" % (disk_name, instance_name)
-                )
-            # We should always have exactly one attached disk matching the name
-            assert len(attached_disks) == 1
-
+        for disk_name, volume_metadata in volumes.items():
             snapshot_name = self._take_snapshot(backup_info, self.zone, disk_name)
 
             # Save useful metadata
             attachment_metadata = [
                 d for d in instance_metadata.disks if d.source.endswith(disk_name)
             ][0]
-            volume_metadata = GcpVolumeMetadata(attachment_metadata, disk_metadata)
             snapshots.append(
                 GcpSnapshotMetadata(
                     snapshot_name=snapshot_name,
                     snapshot_project=self.project,
                     device_name=attachment_metadata.device_name,
-                    volume_metadata=volume_metadata,
+                    mount_options=volume_metadata.mount_options,
+                    mount_point=volume_metadata.mount_point,
                 )
             )
 
@@ -585,11 +571,13 @@ class GcpCloudSnapshotInterface(CloudSnapshotInterface):
             )
             self._delete_snapshot(snapshot.identifier)
 
-    def get_attached_volumes(self, instance_name):
+    def get_attached_volumes(self, instance_name, disks=None):
         instance_metadata = self._get_instance_metadata(instance_name)
         attached_volumes = {}
         for attachment_metadata in instance_metadata.disks:
             disk_name = posixpath.split(urlparse(attachment_metadata.source).path)[-1]
+            if disks and disk_name not in disks:
+                continue
             if disk_name == "":
                 raise SnapshotBackupException(
                     "Could not parse disk name for source %s attached to instance %s"
@@ -609,6 +597,14 @@ class GcpCloudSnapshotInterface(CloudSnapshotInterface):
                 attachment_metadata,
                 disk_metadata,
             )
+        # Check all requested disks were found and complain if necessary
+        if disks is not None:
+            missing_disks = [d for d in disks if d not in attached_volumes]
+            if len(missing_disks) > 0:
+                raise SnapshotBackupException(
+                    "Disks not attached to instance %s: %s"
+                    % (instance_name, ", ".join(missing_disks))
+                )
         return attached_volumes
 
     def instance_exists(self, instance_name):
@@ -659,7 +655,7 @@ class GcpVolumeMetadata(VolumeMetadata):
             if attached_snapshot_name != "":
                 self._snapshot_name = attached_snapshot_name
 
-    def _resolve_mount_info(self, cmd):
+    def resolve_mounted_volume(self, cmd):
         try:
             mount_point, mount_options = cmd.findmnt(self._device_path)
         except CommandException as e:
